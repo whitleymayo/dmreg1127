@@ -1,0 +1,108 @@
+name: IPv64 Reg Distribution (pull private main repo)
+
+on:
+  workflow_dispatch:
+    inputs:
+      workers:
+        description: "并发 lane 数（每个 lane 一个浏览器）"
+        required: true
+        default: "5"
+        type: string
+      count:
+        description: "每个 lane 的目标成功账号数"
+        required: true
+        default: "15"
+        type: string
+      proxy:
+        description: "可选代理（host:port 或完整 URL）"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  PYTHONIOENCODING: utf-8
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  register:
+    name: IPv64 register (public test)
+    runs-on: windows-latest
+    timeout-minutes: 360
+    steps:
+      - name: Mask proxy
+        shell: pwsh
+        run: Write-Host "::add-mask::${{ inputs.proxy }}"
+
+      - name: Decode deploy key
+        id: deploykey
+        shell: bash
+        run: |
+          echo "key<<EOF" >> "$GITHUB_OUTPUT"
+          echo "${{ secrets.MAIN_REPO_TOKEN }}" | base64 -d >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Pull private main repo
+        uses: actions/checkout@v4
+        with:
+          repository: xbox-cn/IPV64_REG_RELEASE_V1
+          ssh-key: ${{ steps.deploykey.outputs.key }}
+          path: mainrepo
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: mainrepo/requirements.txt
+
+      - name: Install deps
+        shell: pwsh
+        working-directory: mainrepo
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Locate Chrome
+        shell: pwsh
+        run: |
+          $paths = @(
+            "C:\Program Files\Google\Chrome\Application\chrome.exe",
+            "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
+          )
+          $chrome = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $chrome) { Write-Error "Chrome not found on runner"; exit 1 }
+          Write-Host "chrome=$chrome"
+          "CHROME_PATH=$chrome" >> $env:GITHUB_ENV
+
+      - name: Register
+        shell: pwsh
+        working-directory: mainrepo
+        env:
+          INPUT_WORKERS: ${{ inputs.workers }}
+          INPUT_COUNT: ${{ inputs.count }}
+          INPUT_PROXY: ${{ inputs.proxy }}
+        run: |
+          $cliArgs = @(
+            "-u", "batch_register.py",
+            "--workers", $env:INPUT_WORKERS,
+            "--count", $env:INPUT_COUNT,
+            "--out-dir", "out",
+            "--chrome", $env:CHROME_PATH
+          )
+          if ($env:INPUT_PROXY) { $cliArgs += @("--proxy", $env:INPUT_PROXY) }
+          Write-Host "args: $($cliArgs -join ' ')"
+          python @cliArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipv64-results
+          retention-days: 1
+          path: |
+            mainrepo/out/accounts.jsonl
+            mainrepo/out/attempts.jsonl
+            mainrepo/out/summary.json
+          if-no-files-found: ignore
